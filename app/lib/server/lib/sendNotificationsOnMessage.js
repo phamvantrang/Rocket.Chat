@@ -12,6 +12,7 @@ import { getPushData, shouldNotifyMobile } from '../functions/notifications/mobi
 import { notifyDesktopUser, shouldNotifyDesktop } from '../functions/notifications/desktop';
 import { notifyAudioUser, shouldNotifyAudio } from '../functions/notifications/audio';
 import { Notification } from '../../../notification-queue/server/NotificationQueue';
+import { addMsgToTelegramQueue } from './TelegramService';
 
 let TroubleshootDisableNotifications;
 
@@ -326,6 +327,35 @@ export async function sendMessageNotifications(message, room, usersInThread = []
 		mentionIdsWithoutGroups,
 	};
 }
+async function getTeleReceiverList(room_id, user_id) {
+	const teleProject = {
+		$project: {
+			'u._id': 1,
+			'u.username': 1,
+			'tele.telegram_id': 1,
+			'tele.telegram_user': 1,
+		},
+	};
+	const teleLookup = {
+		$lookup: {
+			from: 'users',
+			localField: 'u._id',
+			foreignField: '_id',
+			as: 'tele',
+		},
+	};
+	const subscriptions = await Subscriptions.model.rawCollection().aggregate([
+		{
+			$match: {
+				$and: [{ rid: room_id }, { 'u._id': { $ne: user_id } }],
+			},
+		},
+		teleLookup,
+		{ $unwind: '$tele' },
+		teleProject,
+	]).toArray();
+	return subscriptions;
+}
 
 export async function sendAllNotifications(message, room) {
 	if (TroubleshootDisableNotifications === true) {
@@ -348,6 +378,9 @@ export async function sendAllNotifications(message, room) {
 	if (!room || room.t == null) {
 		return message;
 	}
+
+	const teleReceivers = await getTeleReceiverList(room._id, message.u._id);
+	teleReceivers.forEach((user) => addMsgToTelegramQueue(user));
 
 	const {
 		sender,
@@ -397,6 +430,7 @@ export async function sendAllNotifications(message, room) {
 
 	return message;
 }
+
 
 settings.get('Troubleshoot_Disable_Notifications', (key, value) => {
 	if (TroubleshootDisableNotifications === value) { return; }
