@@ -1,6 +1,6 @@
 import { Meteor } from 'meteor/meteor';
 
-import { Users } from '../../../models/server';
+import { Users, TeleHistory } from '../../../models/server';
 
 const TelegramBot = require('node-telegram-bot-api');
 
@@ -15,10 +15,39 @@ const FETCH_MSG_QUEUE_DELAY_MS = process.env.FETCH_MSG_QUEUE_DELAY_MS || 5000; /
 
 const msgQueue = new Map();
 
-function notifyToBot(telegram_id) {
+async function saveTeleHistory(telegram_id, message_id, timestamp) {
+	const history = {
+		tele_id: telegram_id,
+		msg_id: message_id,
+		tm: timestamp,
+	};
+	return TeleHistory.model.rawCollection().insert(history);
+}
+
+async function clearOldChatHistory() {
+	const anchorTime = parseInt(Date.now() / 1000) - 12 * 3600; // find record older than 12 hours
+	const oldRecords = await TeleHistory.model.rawCollection().find({ tm: { $lte: anchorTime } }, { tele_id: 1, msg_id: 1 })
+		.limit(MAX_MSG_PER_SECOND).toArray();
+	if (oldRecords && oldRecords.length > 0) {
+		const deletedIds = [];
+		for (const r of oldRecords) {
+			deletedIds.push(r._id);
+			try {
+				bot.deleteMessage(r.tele_id, r.msg_id);
+			} catch (err) {
+				console.log('Telebot delete failed ', err);
+			}
+		}
+		TeleHistory.model.rawCollection().deleteMany({ _id: { $in: deletedIds } });
+	}
+}
+
+async function notifyToBot(telegram_id) {
 	// console.log('telegram_id', telegram_id);
 	try {
-		bot.sendMessage(telegram_id, 'You have a new message');
+		bot.sendMessage(telegram_id, 'You have a new message').then((res) => {
+			saveTeleHistory(res.chat.id, res.message_id, res.date);
+		});
 	} catch (err) {
 		console.log('Telebot send failed ', err);
 	}
@@ -40,8 +69,10 @@ function sendMsgFromQueue() {
 	}
 }
 
-function sendMsgFromQueueInterval() {
+async function sendMsgFromQueueInterval() {
 	sendMsgFromQueue();
+	await new Promise((resolve) => setTimeout(resolve, 1000));
+	clearOldChatHistory();
 	setTimeout(sendMsgFromQueueInterval, FETCH_MSG_QUEUE_DELAY_MS);
 }
 sendMsgFromQueueInterval();
